@@ -1,0 +1,18 @@
+services:
+  - type: web
+    name: map-signal-worker
+    runtime: node
+    region: singapore
+    plan: starter
+    buildCommand: npm ci
+    startCommand: npm start
+    healthCheckPath: /health
+    autoDeployTrigger: commit
+    maxShutdownDelaySeconds: 30
+    envVars:
+      - key: NODE_VERSION
+        value: 22.22.0
+      - key: SITE_SIGNAL_URL
+        value: https://map-signal-center.eoghgudrhakdnj.chatgpt.site/api/external-signals
+      - key: BACKGROUND_SCAN_SECRET
+        sync: false
