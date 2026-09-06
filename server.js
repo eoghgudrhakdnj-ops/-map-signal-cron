@@ -7,6 +7,7 @@ const HOSTS = ["https://fapi.binance.com", "https://fapi1.binance.com", "https:/
 const EXCLUDED = new Set(["BTC", "USDC", "FDUSD", "TUSD", "USDP", "DAI", "EUR", "TRY", "BUSD"]);
 const INTERVAL_MS = 60_000;
 const POSITION_SYMBOLS = (process.env.POSITION_SYMBOLS || "ENA").split(",").map(value => value.trim().toUpperCase()).filter(value => /^[A-Z0-9]{2,12}$/.test(value)).slice(0, 5);
+const POSITION_MARKET = (process.env.POSITION_MARKET || "FUTURES").toUpperCase() === "SPOT" ? "현물" : "선물";
 let stopping = false, scanning = false, timer;
 let state = { status: "starting", lastScanAt: null, scanned: 0, eligible: 0, delivered: 0, top30: [], signals: [], positionActions: [], error: null };
 
@@ -61,8 +62,8 @@ async function findPositionActions() {
     const alignedLong = four.signal === "롱" && day.signal === "롱";
     const alignedShort = four.signal === "숏" && day.signal === "숏";
     const action = alignedLong ? "보유" : alignedShort ? "손절" : "관망";
-    const averaging = alignedLong && four.rsi < 70 && day.rsi < 70 && four.emaTrend === "상승" && day.emaTrend === "상승" ? "소액 분할 검토" : alignedLong ? "추가매수 대기" : "물타기 금지";
-    return { symbol, current: four.current, action, averaging, signal4h: four.signal, signal1d: day.signal, score4h: four.confidence, score1d: day.confidence, rsi4h: four.rsi, rsi1d: day.rsi };
+    const averaging = POSITION_MARKET === "선물" ? "물타기 금지" : alignedLong && four.rsi < 70 && day.rsi < 70 && four.emaTrend === "상승" && day.emaTrend === "상승" ? "소액 분할 검토" : alignedLong ? "추가매수 대기" : "물타기 금지";
+    return { symbol, market: POSITION_MARKET, current: four.current, action, averaging, signal4h: four.signal, signal1d: day.signal, score4h: four.confidence, score1d: day.confidence, rsi4h: four.rsi, rsi1d: day.rsi };
   });
 }
 
