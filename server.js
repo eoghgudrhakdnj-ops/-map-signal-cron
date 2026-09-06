@@ -6,8 +6,9 @@ const SECRET = process.env.BACKGROUND_SCAN_SECRET || "";
 const HOSTS = ["https://fapi.binance.com", "https://fapi1.binance.com", "https://fapi2.binance.com", "https://fapi3.binance.com", "https://fapi4.binance.com"];
 const EXCLUDED = new Set(["BTC", "USDC", "FDUSD", "TUSD", "USDP", "DAI", "EUR", "TRY", "BUSD"]);
 const INTERVAL_MS = 60_000;
+const POSITION_SYMBOLS = (process.env.POSITION_SYMBOLS || "ENA").split(",").map(value => value.trim().toUpperCase()).filter(value => /^[A-Z0-9]{2,12}$/.test(value)).slice(0, 5);
 let stopping = false, scanning = false, timer;
-let state = { status: "starting", lastScanAt: null, scanned: 0, eligible: 0, delivered: 0, top30: [], signals: [], error: null };
+let state = { status: "starting", lastScanAt: null, scanned: 0, eligible: 0, delivered: 0, top30: [], signals: [], positionActions: [], error: null };
 
 const average = values => values.reduce((sum, value) => sum + value, 0) / Math.max(values.length, 1);
 const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
@@ -23,7 +24,7 @@ function score(rows) {
   const candleUp = +closed[4] >= +closed[1], change1m = ((+closed[4] - +prior[4]) / (+prior[4] || 1)) * 100, currentWidth = bandWidth(analysisCloses), priorWidths = Array.from({ length: 20 }, (_, offset) => bandWidth(analysisCloses.slice(0, analysisCloses.length - offset - 1))), squeezeRatio = currentWidth / (average(priorWidths) || currentWidth || 1);
   let strength = 50; strength += e20 > e50 ? 18 : -18; strength += current > e20 ? 12 : -12; strength += momentum >= 55 && momentum <= 75 ? 12 : momentum < 45 ? -10 : 0; if (volumeRatio > 1.3) strength += candleUp ? 10 : -10; strength += clamp(change1m * 5, -8, 8); if (squeezeRatio < .95) strength += candleUp ? 4 : -4;
   strength = clamp(Math.round(strength), 0, 100); const signal = strength >= 64 ? "롱" : strength <= 36 ? "숏" : "관망", confidence = Math.round(50 + Math.abs(strength - 50));
-  return { current, signal, confidence, executionStrength, change1m };
+  return { current, signal, confidence, executionStrength, change1m, rsi: Math.round(momentum), emaTrend: e20 > e50 ? "상승" : "하락" };
 }
 
 async function api(path) {
@@ -49,15 +50,31 @@ async function findHundredPointSurges(top30) {
   return analyses.sort((a, b) => b.executionStrength - a.executionStrength || b.liveVolume - a.liveVolume).slice(0, 5).map(({ liveVolume, ...result }) => result);
 }
 
-async function deliver(minute100) {
+async function findPositionActions() {
+  return mapLimit(POSITION_SYMBOLS, 3, async symbol => {
+    const [rows4h, rows1d] = await Promise.all([
+      api(`/fapi/v1/klines?symbol=${symbol}USDT&interval=4h&limit=60`),
+      api(`/fapi/v1/klines?symbol=${symbol}USDT&interval=1d&limit=60`),
+    ]);
+    const four = score(rows4h), day = score(rows1d);
+    if (!four || !day) return null;
+    const alignedLong = four.signal === "롱" && day.signal === "롱";
+    const alignedShort = four.signal === "숏" && day.signal === "숏";
+    const action = alignedLong ? "보유" : alignedShort ? "손절" : "관망";
+    const averaging = alignedLong && four.rsi < 70 && day.rsi < 70 && four.emaTrend === "상승" && day.emaTrend === "상승" ? "소액 분할 검토" : alignedLong ? "추가매수 대기" : "물타기 금지";
+    return { symbol, current: four.current, action, averaging, signal4h: four.signal, signal1d: day.signal, score4h: four.confidence, score1d: day.confidence, rsi4h: four.rsi, rsi1d: day.rsi };
+  });
+}
+
+async function deliver(minute100, positionActions) {
   if (!SECRET) throw new Error("BACKGROUND_SCAN_SECRET-missing");
-  const response = await fetch(SITE_SIGNAL_URL, { method: "POST", headers: { "Authorization": `Bearer ${SECRET}`, "Content-Type": "application/json" }, body: JSON.stringify({ minute100 }), signal: AbortSignal.timeout(15000) });
+  const response = await fetch(SITE_SIGNAL_URL, { method: "POST", headers: { "Authorization": `Bearer ${SECRET}`, "Content-Type": "application/json" }, body: JSON.stringify({ minute100, positionActions }), signal: AbortSignal.timeout(15000) });
   if (!response.ok) throw new Error(`delivery-${response.status}`); return response.json();
 }
 
 async function scan() {
   if (scanning || stopping) return; scanning = true;
-  try { const top30 = await topThirty(), minute100 = await findHundredPointSurges(top30), delivery = await deliver(minute100); state = { status: "ok", lastScanAt: new Date().toISOString(), scanned: top30.length, eligible: minute100.length, delivered: Number(delivery.sent || 0), top30: top30.map(item => item.symbol), signals: minute100.map(item => item.symbol), error: null }; console.log(JSON.stringify({ event: "minute-100-scan", ...state })); }
+  try { const [top30, positionActions] = await Promise.all([topThirty(), findPositionActions()]), minute100 = await findHundredPointSurges(top30), delivery = await deliver(minute100, positionActions); state = { status: "ok", lastScanAt: new Date().toISOString(), scanned: top30.length, eligible: minute100.length, delivered: Number(delivery.sent || 0), top30: top30.map(item => item.symbol), signals: minute100.map(item => item.symbol), positionActions: positionActions.map(item => `${item.symbol}:${item.action}`), error: null }; console.log(JSON.stringify({ event: "minute-100-scan", ...state })); }
   catch (error) { state = { ...state, status: "error", lastScanAt: new Date().toISOString(), error: error instanceof Error ? error.message : "unknown" }; console.error(JSON.stringify({ event: "scan-error", ...state })); }
   finally { scanning = false; }
 }
