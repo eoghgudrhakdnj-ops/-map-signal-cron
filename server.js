@@ -5,7 +5,7 @@ const SITE_SIGNAL_URL = process.env.SITE_SIGNAL_URL || "https://map-signal-cente
 const SECRET = process.env.BACKGROUND_SCAN_SECRET || "";
 const HOSTS = ["https://fapi.binance.com", "https://fapi1.binance.com", "https://fapi2.binance.com", "https://fapi3.binance.com", "https://fapi4.binance.com"];
 const EXCLUDED = new Set(["BTC", "USDC", "FDUSD", "TUSD", "USDP", "DAI", "EUR", "TRY", "BUSD"]);
-const INTERVAL_MS = 60_000;
+const INTERVAL_MS = 60_000;\nconst SIGNAL_THRESHOLD = 95;
 const POSITION_SYMBOLS = (process.env.POSITION_SYMBOLS || "").split(",").map(value => value.trim().toUpperCase()).filter(value => /^[A-Z0-9]{2,12}$/.test(value)).slice(0, 5);
 const POSITION_MARKET = (process.env.POSITION_MARKET || "FUTURES").toUpperCase() === "SPOT" ? "현물" : "선물";
 let stopping = false, scanning = false, timer;
@@ -46,8 +46,8 @@ async function topThirty() {
   return ranked.sort((a, b) => b.liveVolume - a.liveVolume).slice(0, 30);
 }
 
-async function findHundredPointSurges(top30) {
-  const analyses = await mapLimit(top30, 8, async item => { const [rows15m, rows30m, rows1h] = await Promise.all(["15m", "30m", "1h"].map(interval => api(`/fapi/v1/klines?symbol=${item.symbol}USDT&interval=${interval}&limit=60`))), five = score(item.rows5m), fifteen = score(rows15m), thirty = score(rows30m), hour = score(rows1h); if (!five || !fifteen || !thirty || !hour || hour.signal !== "롱" || ![five, fifteen, thirty].every(result => result.signal === hour.signal) || ![five, fifteen, thirty, hour].every(result => result.confidence === 100)) return null; return { symbol: item.symbol, current: five.current, score5m: five.confidence, score15m: fifteen.confidence, score30m: thirty.confidence, score1h: hour.confidence, executionStrength: five.executionStrength, change5m: five.change, liveVolume: item.liveVolume }; });
+async function findHighConfidenceSurges(top30) {
+  const analyses = await mapLimit(top30, 8, async item => { const [rows15m, rows30m, rows1h] = await Promise.all(["15m", "30m", "1h"].map(interval => api(`/fapi/v1/klines?symbol=${item.symbol}USDT&interval=${interval}&limit=60`))), five = score(item.rows5m), fifteen = score(rows15m), thirty = score(rows30m), hour = score(rows1h); if (!five || !fifteen || !thirty || !hour || hour.signal !== "롱" || ![five, fifteen, thirty].every(result => result.signal === hour.signal) || ![five, fifteen, thirty, hour].every(result => result.confidence >= SIGNAL_THRESHOLD)) return null; return { symbol: item.symbol, current: five.current, score5m: five.confidence, score15m: fifteen.confidence, score30m: thirty.confidence, score1h: hour.confidence, executionStrength: five.executionStrength, change5m: five.change, liveVolume: item.liveVolume }; });
   return analyses.sort((a, b) => b.executionStrength - a.executionStrength || b.liveVolume - a.liveVolume).slice(0, 5).map(({ liveVolume, ...result }) => result);
 }
 
@@ -75,7 +75,7 @@ async function deliver(trend100, positionActions) {
 
 async function scan() {
   if (scanning || stopping) return; scanning = true;
-  try { const [top30, positionActions] = await Promise.all([topThirty(), findPositionActions()]), trend100 = await findHundredPointSurges(top30), delivery = await deliver(trend100, positionActions); state = { status: "ok", lastScanAt: new Date().toISOString(), scanned: top30.length, eligible: trend100.length, delivered: Number(delivery.sent || 0), top30: top30.map(item => item.symbol), signals: trend100.map(item => item.symbol), positionActions: positionActions.map(item => `${item.symbol}:${item.action}`), error: null }; console.log(JSON.stringify({ event: "hour-trend-100-scan", ...state })); }
+  try { const [top30, positionActions] = await Promise.all([topThirty(), findPositionActions()]), trend100 = await findHighConfidenceSurges(top30), delivery = await deliver(trend100, positionActions); state = { status: "ok", lastScanAt: new Date().toISOString(), scanned: top30.length, eligible: trend100.length, delivered: Number(delivery.sent || 0), top30: top30.map(item => item.symbol), signals: trend100.map(item => item.symbol), positionActions: positionActions.map(item => `${item.symbol}:${item.action}`), error: null }; console.log(JSON.stringify({ event: "hour-trend-95-scan", threshold: SIGNAL_THRESHOLD, ...state })); }
   catch (error) { state = { ...state, status: "error", lastScanAt: new Date().toISOString(), error: error instanceof Error ? error.message : "unknown" }; console.error(JSON.stringify({ event: "scan-error", ...state })); }
   finally { scanning = false; }
 }
